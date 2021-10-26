@@ -157,7 +157,7 @@ struct ccColor {
 	{
 		if(Name[size - 1] == "")
 		{
-			delete Name[size - 1];
+			//delete Name[size - 1];
 			size--;
 		}
 	};

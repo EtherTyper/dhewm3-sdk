@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
 project(dhewm3sdk)
 
+set(CMAKE_CXX_FLAGS "-stdlib=libc++")
+
 option(BASE		"Build the base (game/) game code" ON)
 set(BASE_NAME	"doom3cc" CACHE STRING "Name of the mod built from game/ (will result in \${BASE_NAME}.dll)")
 set(BASE_DEFS	"GAME_DLL" CACHE STRING "Compiler definitions for the mod built from game/")
@@ -148,8 +150,8 @@ if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
 		add_definitions(-DMACOS_X=1)
 
 		if(cpu STREQUAL "x86_64")
-			add_compile_options(-arch x86_64 -mmacosx-version-min=10.6)
-			set(ldflags "${ldflags} -arch x86_64 -mmacosx-version-min=10.6")
+			add_compile_options(-arch x86_64 -mmacosx-version-min=11.0)
+			set(ldflags "${ldflags} -arch x86_64 -mmacosx-version-min=11.0")
 		elseif(cpu STREQUAL "arm64")
 			add_compile_options(-arch arm64 -mmacosx-version-min=11.0)
 			set(ldflags "${ldflags} -arch arm64 -mmacosx-version-min=11.0")
