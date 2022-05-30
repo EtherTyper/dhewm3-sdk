@@ -30,10 +30,15 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/math/Vector.h"
 #include "idlib/Heap.h"
 #include "framework/Common.h"
+#include <limits.h>
 
 #include "idlib/Str.h"
 
-#if !defined( ID_REDIRECT_NEWDELETE ) && !defined( MACOS_X )
+// DG: idDynamicBlockAlloc isn't thread-safe and idStr is used both in the main thread
+//     and the async thread! For some reason this seems to cause lots of problems on
+//     newer Linux distros if dhewm3 is built with GCC9 or newer (see #391).
+//     No idea why it apparently didn't cause that (noticeable) issues before..
+#if 0 // !defined( ID_REDIRECT_NEWDELETE ) && !defined( MACOS_X )
 	#define USE_STRING_DATA_ALLOCATOR
 #endif
 
@@ -100,23 +105,30 @@ void idStr::ReAllocate( int amount, bool keepold ) {
 
 #ifdef USE_STRING_DATA_ALLOCATOR
 	newbuffer = stringDataAllocator.Alloc( alloced );
-#else
-	newbuffer = new char[ alloced ];
-#endif
 	if ( keepold && data ) {
 		data[ len ] = '\0';
 		strcpy( newbuffer, data );
 	}
 
 	if ( data && data != baseBuffer ) {
-#ifdef USE_STRING_DATA_ALLOCATOR
 		stringDataAllocator.Free( data );
-#else
-		delete [] data;
-#endif
 	}
 
 	data = newbuffer;
+#else
+	if ( data && data != baseBuffer ) {
+		data = (char *)realloc( data, newsize );
+	} else {
+		newbuffer = (char *)malloc( newsize );
+		if ( data && keepold ) {
+			memcpy( newbuffer, data, len );
+			newbuffer[ len ] = '\0';
+		} else {
+			newbuffer[ 0 ] = '\0';
+		}
+		data = newbuffer;
+	}
+#endif
 }
 
 /*
@@ -129,7 +141,7 @@ void idStr::FreeData( void ) {
 #ifdef USE_STRING_DATA_ALLOCATOR
 		stringDataAllocator.Free( data );
 #else
-		delete[] data;
+		free( data );
 #endif
 		data = baseBuffer;
 	}
@@ -1502,21 +1514,25 @@ idStr::snPrintf
 ================
 */
 int idStr::snPrintf( char *dest, int size, const char *fmt, ...) {
-	int len;
 	va_list argptr;
-	char buffer[32000];	// big, but small enough to fit in PPC stack
-
+	int len;
 	va_start( argptr, fmt );
-	len = vsprintf( buffer, fmt, argptr );
+	len = D3_vsnprintfC99(dest, size, fmt, argptr);
 	va_end( argptr );
-	if ( len >= sizeof( buffer ) ) {
+	if ( len >= 32000 ) {
+		// TODO: Previously this function used a 32000 byte buffer to write into
+		//       with vsprintf(), and raised this error if that was overflowed
+		//       (more likely that'd have lead to a crash..).
+		//       Technically we don't have that restriction anymore, so I'm unsure
+		//       if this error should really still be raised to preserve
+		//       the old intended behavior, maybe for compat with mod DLLs using
+		//       the old version of the function or something?
 		idLib::common->Error( "idStr::snPrintf: overflowed buffer" );
 	}
 	if ( len >= size ) {
 		idLib::common->Warning( "idStr::snPrintf: overflow of %i in %i\n", len, size );
 		len = size;
 	}
-	idStr::Copynz( dest, buffer, size );
 	return len;
 }
 
@@ -1539,18 +1555,7 @@ or returns -1 on failure or if the buffer would be overflowed.
 ============
 */
 int idStr::vsnPrintf( char *dest, int size, const char *fmt, va_list argptr ) {
-	int ret;
-
-#ifdef _WIN32
-#undef _vsnprintf
-	ret = _vsnprintf( dest, size-1, fmt, argptr );
-#define _vsnprintf	use_idStr_vsnPrintf
-#else
-#undef vsnprintf
-	ret = vsnprintf( dest, size, fmt, argptr );
-#define vsnprintf	use_idStr_vsnPrintf
-#endif
-	dest[size-1] = '\0';
+	int ret = D3_vsnprintfC99(dest, size, fmt, argptr);
 	if ( ret < 0 || ret >= size ) {
 		return -1;
 	}
@@ -1778,4 +1783,58 @@ idStr idStr::FormatNumber( int number ) {
 	}
 
 	return string;
+}
+
+// behaves like C99's vsnprintf() by returning the amount of bytes that
+// *would* have been written into a big enough buffer, even if that's > size
+// unlike idStr::vsnPrintf() which returns -1 in that case
+int D3_vsnprintfC99(char *dst, size_t size, const char *format, va_list ap)
+{
+	// before VS2015, it didn't have a standards-conforming (v)snprintf()-implementation
+	// same might be true for other windows compilers if they use old CRT versions, like MinGW does
+#if defined(_WIN32) && (!defined(_MSC_VER) || _MSC_VER < 1900)
+  #undef _vsnprintf
+	// based on DG_vsnprintf() from https://github.com/DanielGibson/Snippets/blob/master/DG_misc.h
+	int ret = -1;
+	if(dst != NULL && size > 0)
+	{
+#if defined(_MSC_VER) && _MSC_VER >= 1400
+		// I think MSVC2005 introduced _vsnprintf_s().
+		// this shuts up _vsnprintf() security/deprecation warnings.
+		ret = _vsnprintf_s(dst, size, _TRUNCATE, format, ap);
+#else
+		ret = _vsnprintf(dst, size, format, ap);
+		dst[size-1] = '\0'; // ensure '\0'-termination
+#endif
+	}
+
+	if(ret == -1)
+	{
+		// _vsnprintf() returns -1 if the output is truncated
+		// it's also -1 if dst or size were NULL/0, so the user didn't want to write
+		// we want to return the number of characters that would've been
+		// needed, though.. fortunately _vscprintf() calculates that.
+		ret = _vscprintf(format, ap);
+	}
+	return ret;
+  #define _vsnprintf	use_idStr_vsnPrintf
+#else // other operating systems and VisualC++ >= 2015 should have a proper vsnprintf()
+  #undef vsnprintf
+	return vsnprintf(dst, size, format, ap);
+  #define vsnprintf	use_idStr_vsnPrintf
+#endif
+}
+
+// behaves like C99's snprintf() by returning the amount of bytes that
+// *would* have been written into a big enough buffer, even if that's > size
+// unlike idStr::snPrintf() which returns the written bytes in that case
+// and also calls common->Warning() in case of overflows
+int D3_snprintfC99(char *dst, size_t size, const char *format, ...)
+{
+	int ret = 0;
+	va_list argptr;
+	va_start( argptr, format );
+	ret = D3_vsnprintfC99(dst, size, format, argptr);
+	va_end( argptr );
+	return ret;
 }
